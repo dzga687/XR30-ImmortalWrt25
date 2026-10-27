@@ -19,6 +19,12 @@ on:
     paths-ignore:
       - '**.md'
 
+# 同一分支只允许一个构建在跑：新触发会自动取消旧的，
+# 避免 push 与 workflow_dispatch 同时生效时出现两个 run 并行编译。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   REPO_URL: https://github.com/chasey-dev/immortalwrt-mt798x-rebase
   REPO_BRANCH: 25.12
@@ -38,26 +44,56 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 这一步原来会无上限地挂住：apt 没有重试上限，末尾那句
+      # `bash <(curl -s https://build-scripts.immortalwrt.org/...)` 里的 curl
+      # 也没设 --max-time，对方一旦不回包就会永久等待。实测卡了 41 分钟
+      # 没有任何输出。现在：拆成带标记的子步骤、apt 加超时与重试、
+      # 去掉不可控的远端脚本，并给整步设 30 分钟硬上限。
       - name: 安装编译依赖
+        timeout-minutes: 30
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force || true
-          sudo -E apt-get -qq update
-          sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+          set -x
+          echo "==> [1/6] 清理 runner 上占空间的大目录"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+
+          # runner 起机时常有 unattended-upgrades 在后台跑，会长时间占住
+          # dpkg 锁，apt 就会静默停在 "Waiting for cache lock" 不动。
+          echo "==> [2/6] 停掉会抢 dpkg 锁的后台任务"
+          sudo systemctl stop unattended-upgrades 2>/dev/null || true
+          sudo systemctl disable unattended-upgrades 2>/dev/null || true
+          sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+          sudo pkill -f unattended-upgrade 2>/dev/null || true
+          sleep 2
+          echo "残留 apt/dpkg 进程:"
+          pgrep -a 'apt|dpkg|unattended' || echo "  (无)"
+
+          echo "==> [3/6] 刷新软件源（3 次重试，单次 60s 超时，锁最多等 120s）"
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=60 \
+                       -o DPkg::Lock::Timeout=120 update
+
+          echo "==> [4/6] 安装编译依赖"
+          timeout 1500 sudo -E apt-get -qq install -y --no-install-recommends \
+            -o DPkg::Lock::Timeout=120 \
+            ack antlr3 asciidoc autoconf automake autopoint bc binutils bison build-essential \
             bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
             git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev \
-            libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev \
-            libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 \
-            python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo \
-            uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
-          sudo bash -c 'bash <(curl -s https://build-scripts.immortalwrt.org/init_build_environment.sh)'
-          sudo -E apt-get -qq autoremove --purge
-          sudo -E apt-get -qq clean
+            libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libpython3-dev libreadline-dev \
+            libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python3 \
+            python3-docutils python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo \
+            time uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev \
+            || { echo "!! 依赖安装失败，已装包数:"; dpkg -l | grep -c '^ii' ; exit 1; }
+
+          echo "==> [5/6] 清理"
+          sudo -E apt-get -qq -o DPkg::Lock::Timeout=120 autoremove --purge || true
+          sudo -E apt-get -qq clean || true
           sudo timedatectl set-timezone "$TZ"
+
+          echo "==> [6/6] 准备构建目录"
           sudo mkdir -p /workdir
           sudo chown $USER:$GROUPS /workdir
+          echo "==> 依赖完成：$(gcc --version | head -1) / $(python3 --version)"
 
       # GitHub 的 ubuntu-22.04 runner 自带 /swapfile（且正在使用），
       # 直接 fallocate 覆盖会报 "Text file busy"。所以先检测，没有才建，
@@ -77,10 +113,11 @@ jobs:
           swapon --show || true
 
       - name: 拉取源码
+        timeout-minutes: 25
         working-directory: /workdir
         run: |
           df -hT $PWD
-          git clone $REPO_URL -b $REPO_BRANCH openwrt
+          git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
           ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
       - name: 声明第三方 feed
@@ -91,9 +128,11 @@ jobs:
           grep -E '^src-git' feeds.conf.default
 
       - name: 更新 feeds
+        timeout-minutes: 20
         run: cd openwrt && ./scripts/feeds update -a
 
       - name: 安装 feeds
+        timeout-minutes: 15
         run: cd openwrt && ./scripts/feeds install -a
 
       - name: 植入补丁并写入配置
@@ -113,6 +152,7 @@ jobs:
           bash "$GITHUB_WORKSPACE/verify-config.sh"
 
       - name: 下载依赖包
+        timeout-minutes: 60
         run: |
           cd openwrt
           make download -j8 || make download -j1 V=s
@@ -130,6 +170,7 @@ jobs:
 
       - name: 编译
         id: compile
+        timeout-minutes: 240
         run: |
           cd openwrt
           echo "$(nproc) 线程编译"
