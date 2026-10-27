@@ -206,10 +206,14 @@ jobs:
           cd openwrt
           make package/mtk/drivers/mt_wifi/prepare V=s 2>&1 | tail -40
 
-      # 每次失败都要重跑近 90 分钟的编译，太贵。打开 CONFIG_CCACHE 后
+      # 每次失败都要重跑近 3 小时的编译，太贵。打开 CONFIG_CCACHE 后
       # 把 ~/.ccache 存成 cache：重跑时只重编改动过的部分。
+      # 注意必须用 restore/save 两个独立 action：actions/cache 自带的
+      # post 保存步骤默认条件是 success()，编译一失败就不会存 —— 而失败
+      # 恰恰是最需要缓存的时候。
       - name: 恢复 ccache
-        uses: actions/cache@v4
+        id: ccache-restore
+        uses: actions/cache/restore@v4
         with:
           path: ~/.ccache
           key: ccache-${{ github.run_id }}-${{ github.run_attempt }}
@@ -270,6 +274,13 @@ jobs:
       - name: 空间占用
         if: (!cancelled())
         run: df -hT
+
+      - name: 保存 ccache（即使编译失败也存，下次重跑才快）
+        if: always() && !cancelled()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: 整理产物
         id: organize

@@ -79,6 +79,23 @@ for d in feeds/*/*/luci-app-weechat feeds/*/*/weechat \
     fi
 done
 
+# zabbix：run 40563666745 挂在它上面（编译第 197 分钟）
+#   ERROR: package/feeds/packages/zabbix failed to build (build variant: basic)
+#   /usr/include/syslog.h:200:52: error: unknown type name '__gnuc_va_list'
+# 它的 configure 把宿主机 glibc 的 /usr/include 拉进了交叉编译的 include 路径，
+# 于是 glibc 头和 musl 的 fortify 头互相打架（__gnuc_va_list 未定义、
+# confstr/read/poll 重复定义），跟我们的固件毫无关系。
+# 路由器上没有任何理由跑 zabbix 监控代理，直接摘掉：
+#   1) 不再编译，省几分钟
+#   2) 顺带把 libmbedtls/zabbix-agentd 一并从镜像里去掉
+for d in feeds/*/*/zabbix package/feeds/*/zabbix; do
+    if [ -L "$d" ] || [ -e "$d" ]; then
+        rm -rf "$d"
+        echo "  移除 $d（宿主机头文件污染，交叉编译不过）"
+    fi
+done
+sed -i '/zabbix/d' .config
+
 # luci-app-store 的 Makefile 里有两处会让 kconfig 直接把它隐藏掉：
 #   1) LUCI_EXTRA_DEPENDS:=luci-lib-taskd (>=1.0.19) —— 带版本号的依赖，
 #      kconfig 不认版本约束，生成的 depends on 永远不成立，符号被隐藏，
