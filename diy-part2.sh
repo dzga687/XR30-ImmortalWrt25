@@ -57,11 +57,27 @@ if [ "$patch_count" -eq 0 ]; then
 fi
 echo "  共植入 $patch_count 个补丁"
 
-echo "==> [3/5] 清理 passwall 残留配置"
+echo "==> [3/5] 清理 passwall 残留与 weechat"
 # luci-app-passwall 不在任何构建期 feed 里（原脚本写的是 apk 运行时源，
 # 而且路径写错到了 package/system/opkg/files/），make defconfig 会把它静默丢弃。
 # 这里直接删掉相关行，避免"配置里写着有、固件里其实没有"的错觉。
 sed -i '/passwall/d' .config
+
+# weechat 的 Kconfig 有循环依赖（luci-app-weechat → weechat-full → weechat-minimal
+# → 又被 luci-app-weechat select），kconfig 会报
+#   "error: recursive dependency detected!"
+# 然后中途退出，留下一个不一致的 .config —— 表现为若干个毫不相关的包被静默丢掉。
+# 路由器上没人要用 weechat，直接把这两个包摘掉，让 defconfig 干净退出。
+#
+# 注意两处都要删：feeds install 在 package/feeds/<feed>/ 下建的是软链接，
+# 只删 feed 源目录会留下悬空链接，后续扫描 package/ 时会报错。
+for d in feeds/*/*/luci-app-weechat feeds/*/*/weechat \
+         package/feeds/*/luci-app-weechat package/feeds/*/weechat; do
+    if [ -L "$d" ] || [ -e "$d" ]; then
+        rm -rf "$d"
+        echo "  移除 $d（消除 kconfig 循环依赖）"
+    fi
+done
 
 echo "==> [4/5] 按 config.add 写入开关"
 set_cfg() {

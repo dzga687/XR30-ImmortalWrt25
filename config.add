@@ -5,11 +5,16 @@
 # ============================================================================
 
 # --- REQ-01 iStore 软件中心 ---------------------------------------------------
-# 依赖：curl / tar / mount-utils / libuci-lua / luci-lib-taskd（taskd 是 Go 程序）
+# 依赖链：luci-app-store → luci-lib-taskd → taskd → script-utils / coreutils-stty
+# 原 .config 里 script-utils 与 coreutils-stty 是显式 "is not set"，
+# 链断在这里，defconfig 会把整个 luci-app-store 静默丢掉。
+# （实测：只漏这两项时，verify 报 REQ-01 MISS，其余 9 项全过）
 CONFIG_PACKAGE_luci-app-store=y
 CONFIG_PACKAGE_luci-lib-taskd=y
 CONFIG_PACKAGE_luci-lib-xterm=y
 CONFIG_PACKAGE_taskd=y
+CONFIG_PACKAGE_script-utils=y
+CONFIG_PACKAGE_coreutils-stty=y
 CONFIG_PACKAGE_mount-utils=y
 CONFIG_PACKAGE_tar=y
 
