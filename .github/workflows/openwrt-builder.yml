@@ -59,13 +59,22 @@ jobs:
           sudo mkdir -p /workdir
           sudo chown $USER:$GROUPS /workdir
 
-      - name: 增加 swap（防 OOM）
+      # GitHub 的 ubuntu-22.04 runner 自带 /swapfile（且正在使用），
+      # 直接 fallocate 覆盖会报 "Text file busy"。所以先检测，没有才建，
+      # 并且用不同路径，避免踩到已有的活动 swap 文件。
+      - name: 确保有 swap（runner 自带则跳过）
         run: |
-          sudo fallocate -l 2G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=2048
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          if swapon --show | grep -q .; then
+            echo "runner 已启用 swap，跳过创建"
+          else
+            echo "未检测到 swap，创建 2G"
+            sudo fallocate -l 2G /swapfile_ci || sudo dd if=/dev/zero of=/swapfile_ci bs=1M count=2048
+            sudo chmod 600 /swapfile_ci
+            sudo mkswap /swapfile_ci
+            sudo swapon /swapfile_ci
+          fi
           free -h
+          swapon --show || true
 
       - name: 拉取源码
         working-directory: /workdir
