@@ -1,39 +1,78 @@
-**English** | [中文](https://p3terx.com/archives/build-openwrt-with-github-actions.html)
+# XR30 ImmortalWrt 25.12 自编译固件
 
-# Actions-OpenWrt
+CMCC XR30（NAND 版，MTK / H大 U-Boot 固定分区）专用固件源码仓库，用 GitHub Actions 云端编译。
 
-[![LICENSE](https://img.shields.io/github/license/mashape/apistatus.svg?style=flat-square&label=LICENSE)](https://github.com/P3TERX/Actions-OpenWrt/blob/master/LICENSE)
-![GitHub Stars](https://img.shields.io/github/stars/P3TERX/Actions-OpenWrt.svg?style=flat-square&label=Stars&logo=github)
-![GitHub Forks](https://img.shields.io/github/forks/P3TERX/Actions-OpenWrt.svg?style=flat-square&label=Forks&logo=github)
+## 基线
 
-A template for building OpenWrt with GitHub Actions
+| 项 | 值 |
+| --- | --- |
+| 源码 | `chasey-dev/immortalwrt-mt798x-rebase` |
+| 分支 | `25.12` |
+| 设备 | `cmcc_xr30-nand-mtkuboot` |
+| 分区布局 | NAND + MTK/H大 U-Boot 固定分区（`UBINIZE_OPTS -E 5`、`IMAGE_SIZE 116736k`、`KERNEL_IN_UBI`、`factory.bin = append-ubi`） |
+| 无线驱动 | MTK 闭源 `mt_wifi` 7.6.7.3（7673）+ WARP v2 |
+| 包管理器 | apk（沿用基线默认，未改 opkg） |
 
-## Usage
+> 设备定义在 `target/linux/mediatek/image/filogic-ext.mk`，本仓库没有自己移植设备树——上游已带。
+> `-ubootmod`（OpenWrt U-Boot）那套与本机 U-Boot 不匹配，刷了会变砖。
 
-- Click the [Use this template](https://github.com/P3TERX/Actions-OpenWrt/generate) button to create a new repository.
-- Generate `.config` files using [Lean's OpenWrt](https://github.com/coolsnowwolf/lede) source code. ( You can change it through environment variables in the workflow file. )
-- Push `.config` file to the GitHub repository.
-- Select `Build OpenWrt` on the Actions page.
-- Click the `Run workflow` button.
-- When the build is complete, click the `Artifacts` button in the upper right corner of the Actions page to download the binaries.
+## 内置功能
 
-## Tips
+| 需求 | 实现 | 配置开关 |
+| --- | --- | --- |
+| iStore 软件中心 | `luci-app-store` + `taskd` | `config.add` REQ-01 |
+| 无线中继面板 | `luci-app-mtwifi-cfg` + 驱动 `APCLI_SUPPORT` | REQ-02 |
+| USB 4G 上网 | `kmod-usb-net-rndis / cdc-ncm / cdc-mbim / qmi-wwan`、`usb-modeswitch`、`uqmi` | REQ-03 |
+| 模组管理 | `luci-app-qmodem-next`（QModem，纯 JS 前端） | REQ-04 |
+| 科学上网 | `luci-app-openclash`（不再带 passwall） | REQ-05 |
+| 硬件加速 | `kmod-mediatek_hnat` + `luci-app-turboacc-mtk` + WARP | REQ-06 |
+| 定时重启 | `luci-app-autoreboot` | REQ-07 |
+| 流量统计 | `luci-app-nlbwmon` | REQ-08 |
+| 网页终端 | `luci-app-ttyd` | REQ-09 |
+| SSH / SFTP | `dropbear` + `openssh-sftp-server` | REQ-10 |
 
-- It may take a long time to create a `.config` file and build the OpenWrt firmware. Thus, before create repository to build your own firmware, you may check out if others have already built it which meet your needs by simply [search `Actions-Openwrt` in GitHub](https://github.com/search?q=Actions-openwrt).
-- Add some meta info of your built firmware (such as firmware architecture and installed packages) to your repository introduction, this will save others' time.
+## 驱动补丁（本仓库重点）
+
+`patches/` 下的两个补丁会被 `diy-part2.sh` 拷进
+`package/mtk/drivers/mt_wifi/patches-7673/`，由 quilt 自动应用：
+
+- `042-pmf-skip-saquery-on-not-robust-unicast.patch`
+  命中 `NOT_ROBUST_UNICAST_FRAME` 时不再调用 `PMF_MlmeSAQueryReq()`，只保持原来的
+  `return FALSE`（= 丢弃该管理帧）。不发起 SA Query，就没有后续的超时踢人。
+- `043-pmf-keep-wcid-on-saquery-timeout.patch`
+  SA Query 定时器超时后不再 `cntl_disconnect_request()` / `mac_entry_delete()`，
+  不再踢除 wcid。
+
+> 这两个是 **mt_wifi 闭源 SDK 驱动补丁**，不是主线 OpenWrt 补丁，上游仓库不带。
+> 补丁上下文基于 `mt79xx_20250408-705eb4.tar.xz`（7673 版本的源码包），换驱动版本要重做。
+> 若上游以后占用了 042/043 编号，`diy-part2.sh` 会直接报错中止。
+
+## 构建
+
+推送到 `main` 会自动触发；也可在 Actions 页手动 `Run workflow`。
+
+本地想跑的话：把本仓库当成 `$GITHUB_WORKSPACE`，先 `git clone` 基线到 `openwrt/`，
+然后依次执行 `diy-part1.sh`（在 feeds update 前）、`feeds update -a && feeds install -a`、
+`diy-part2.sh`、`make defconfig`、`verify-config.sh`、`make -j$(nproc)`。
+
+## 刷机前
+
+1. 确认是 **NAND 版**，U-Boot 是 **H大 fixed-parts**；
+2. 备份 Factory / Bdata / u-boot-env / BL2 / FIP；
+3. 首刷用 `factory.bin`（U-Boot 网页恢复），升级用 `sysupgrade.bin`；
+4. 默认 LAN：`192.168.3.254`，无密码。
+
+## 已知取舍
+
+- **HNAT 与代理互斥**：OpenClash 走 tproxy 会打断 netfilter 快路径，HNAT 面板显示"已开启"但实际失效。
+  跑代理时把 `turboacc` 的 HNAT/BBR 关掉，或只用 BBR。
+- **iStore 只装轻量包**：128MB NAND 下 squashfs 约 32MB，UBI 卷约 114MB，overlay 余量看产物大小。
+  大插件让 iStore 装到 U 盘更稳。
+- **nlbwmon 写 NAND**：统计库在 `/etc/nlbwmon`，长期累计会磨损闪存，建议保留天数 ≤ 30。
+- **passwall 已移除**：原仓库的 passwall 源写错了位置（apk 地址写进 opkg 目录），实际从未编进固件。
 
 ## Credits
 
-- [Microsoft Azure](https://azure.microsoft.com)
-- [GitHub Actions](https://github.com/features/actions)
-- [OpenWrt](https://github.com/openwrt/openwrt)
-- [coolsnowwolf/lede](https://github.com/coolsnowwolf/lede)
-- [Mikubill/transfer](https://github.com/Mikubill/transfer)
-- [softprops/action-gh-release](https://github.com/softprops/action-gh-release)
-- [Mattraks/delete-workflow-runs](https://github.com/Mattraks/delete-workflow-runs)
-- [dev-drprasad/delete-older-releases](https://github.com/dev-drprasad/delete-older-releases)
-- [peter-evans/repository-dispatch](https://github.com/peter-evans/repository-dispatch)
-
-## License
-
-[MIT](https://github.com/P3TERX/Actions-OpenWrt/blob/main/LICENSE) © [**P3TERX**](https://p3terx.com)
+- [chasey-dev/immortalwrt-mt798x-rebase](https://github.com/chasey-dev/immortalwrt-mt798x-rebase)
+- [P3TERX/Actions-OpenWrt](https://github.com/P3TERX/Actions-OpenWrt)
+- [vernesong/OpenClash](https://github.com/vernesong/OpenClash) · [istoreos/istore](https://github.com/istoreos/istore) · [FUjr/QModem](https://github.com/FUjr/QModem)

@@ -1,0 +1,30 @@
+--- a/mt_wifi/embedded/security/pmf.c
++++ b/mt_wifi/embedded/security/pmf.c
+@@ -1487,7 +1487,12 @@
+ 			if ((pEntry) && IS_ENTRY_PEER_AP(pEntry)) {
+ 				if (((FC->SubType == SUBTYPE_DISASSOC) || (FC->SubType == SUBTYPE_DEAUTH))
+ 					&& (pEntry->SecConfig.PmfCfg.UsePMFConnect == TRUE)) {
+-					PMF_MlmeSAQueryReq(pAd, pEntry);
++					/* XR30-PMF: 不再对未加密的单播 Deauth/Disassoc 发起 SA Query。
++					 * 对端（部分平板/上游 AP）不回 SA Query Response 时，定时器超时会走到
++					 * PMF_SAQueryTimeOut() 把 wcid 删掉 / 断开链路，表现为反复断流。
++					 * 本函数返回 FALSE 的含义是「丢弃该管理帧」，不是错误码；因此这里保持
++					 * return FALSE 不变，做到既不发起 SA Query，也不让未加密 Deauth 生效。 */
++					/* PMF_MlmeSAQueryReq(pAd, pEntry); */
+ 					return FALSE;
+ 				}
+ 			}
+@@ -1536,7 +1541,12 @@
+ 		case NOT_ROBUST_UNICAST_FRAME:
+ 			if (((FC->SubType == SUBTYPE_DISASSOC) || (FC->SubType == SUBTYPE_DEAUTH))
+ 				&& (pEntry->SecConfig.PmfCfg.UsePMFConnect == TRUE)) {
+-				PMF_MlmeSAQueryReq(pAd, pEntry);
++				/* XR30-PMF: 不再对未加密的单播 Deauth/Disassoc 发起 SA Query。
++				 * 对端（部分平板/上游 AP）不回 SA Query Response 时，定时器超时会走到
++				 * PMF_SAQueryTimeOut() 把 wcid 删掉 / 断开链路，表现为反复断流。
++				 * 本函数返回 FALSE 的含义是「丢弃该管理帧」，不是错误码；因此这里保持
++				 * return FALSE 不变，做到既不发起 SA Query，也不让未加密 Deauth 生效。 */
++				/* PMF_MlmeSAQueryReq(pAd, pEntry); */
+ 				return FALSE;
+ 			}
+ 

@@ -1,31 +1,31 @@
 #
-# https://github.com/P3TERX/Actions-OpenWrt
+# XR30 固件构建流水线
+# 基线：chasey-dev/immortalwrt-mt798x-rebase @ 25.12
+# 设备：cmcc_xr30-nand-mtkuboot（NAND + MTK/H大 U-Boot 固定分区）
 #
-# File: .github/workflows/openwrt-bulder.yml
-# Description: Build OpenWrt using GitHub Actions
+# 与原模板的差别：
+#   1. 手工触发之外，push 到 main 也会构建（改脚本后不用再点一次）
+#   2. 加了 2G swap，防止 ruby/golang 并发编译时 OOM
+#   3. defconfig 之后跑 verify-config.sh 硬校验，缺功能就早失败
+#   4. 编译前先 prepare 一次 mt_wifi，验证 PMF 补丁能干净应用
+#   5. 清理类步骤改为不阻断（缺 PAT 时不影响拿产物）
 #
-# Copyright (c) 2019-2024 P3TERX <https://p3terx.com>
-#
-# This is free software, licensed under the MIT License.
-# See /LICENSE for more information.
-#
-
-name: OpenWrt Builder
+name: Build XR30 Firmware
 
 on:
-  repository_dispatch:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
 
 env:
   REPO_URL: https://github.com/chasey-dev/immortalwrt-mt798x-rebase
   REPO_BRANCH: 25.12
-  FEEDS_CONF: feeds.conf.default
+  DEVICE: cmcc_xr30-nand-mtkuboot
   CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
-  UPLOAD_BIN_DIR: false
-  UPLOAD_FIRMWARE: true
-  UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
 
 jobs:
@@ -35,170 +35,169 @@ jobs:
       contents: write
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v7
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Initialization environment
-      env:
-        DEBIAN_FRONTEND: noninteractive
-      run: |
-        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-        sudo docker image prune --all --force
-        sudo -E apt-get -qq update
-        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
-        sudo bash -c 'bash <(curl -s https://build-scripts.immortalwrt.org/init_build_environment.sh)'
-        sudo -E apt-get -qq autoremove --purge
-        sudo -E apt-get -qq clean
-        sudo timedatectl set-timezone "$TZ"
-        sudo mkdir -p /workdir
-        sudo chown $USER:$GROUPS /workdir
+      - name: 安装编译依赖
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
+            git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev \
+            libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev \
+            libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 \
+            python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo \
+            uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+          sudo bash -c 'bash <(curl -s https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+          sudo -E apt-get -qq autoremove --purge
+          sudo -E apt-get -qq clean
+          sudo timedatectl set-timezone "$TZ"
+          sudo mkdir -p /workdir
+          sudo chown $USER:$GROUPS /workdir
 
-    - name: Clone source code
-      working-directory: /workdir
-      run: |
-        df -hT $PWD
-        git clone $REPO_URL -b $REPO_BRANCH openwrt
-        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+      - name: 增加 swap（防 OOM）
+        run: |
+          sudo fallocate -l 2G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=2048
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
 
-    - name: Load custom feeds
-      run: |
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-        chmod +x $DIY_P1_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
+      - name: 拉取源码
+        working-directory: /workdir
+        run: |
+          df -hT $PWD
+          git clone $REPO_URL -b $REPO_BRANCH openwrt
+          ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
-    - name: Update feeds
-      run: cd openwrt && ./scripts/feeds update -a
+      - name: 声明第三方 feed
+        run: |
+          cd openwrt
+          chmod +x "$GITHUB_WORKSPACE/$DIY_P1_SH"
+          bash "$GITHUB_WORKSPACE/$DIY_P1_SH"
+          grep -E '^src-git' feeds.conf.default
 
-    - name: Install feeds
-      run: cd openwrt && ./scripts/feeds install -a
+      - name: 更新 feeds
+        run: cd openwrt && ./scripts/feeds update -a
 
-    - name: Load custom configuration
-      run: |
-        [ -e files ] && mv files openwrt/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-        chmod +x $DIY_P2_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P2_SH
+      - name: 安装 feeds
+        run: cd openwrt && ./scripts/feeds install -a
 
-    - name: Download package
-      id: package
-      run: |
-        cd openwrt
-        make defconfig
-        make download -j8
-        find dl -size -1024c -exec ls -l {} \;
-        find dl -size -1024c -exec rm -f {} \;
+      - name: 植入补丁并写入配置
+        run: |
+          chmod +x "$GITHUB_WORKSPACE/$DIY_P2_SH"
+          cp "$GITHUB_WORKSPACE/$CONFIG_FILE" openwrt/.config
+          cd openwrt
+          bash "$GITHUB_WORKSPACE/$DIY_P2_SH"
 
-    - name: Compile the firmware
-      id: compile
-      run: |
-        cd openwrt
-        echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 || make -j1 V=s
-        echo "status=success" >> $GITHUB_OUTPUT
-        DEVICE_NAME="$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' | sort -u | tr '\n' '_' | sed 's/_$//')"
-        [ -n "$DEVICE_NAME" ] && echo "DEVICE_NAME=_${DEVICE_NAME}" >> $GITHUB_ENV
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+      - name: defconfig
+        run: cd openwrt && make defconfig
 
-    - name: Check space usage
-      if: (!cancelled())
-      run: df -hT
+      - name: 硬校验配置
+        run: |
+          chmod +x "$GITHUB_WORKSPACE/verify-config.sh"
+          cd openwrt
+          bash "$GITHUB_WORKSPACE/verify-config.sh"
 
-    - name: Upload bin directory
-      uses: actions/upload-artifact@main
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
-      with:
-        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: openwrt/bin
+      - name: 下载依赖包
+        run: |
+          cd openwrt
+          make download -j8 || make download -j1 V=s
+          find dl -size -1024c -exec ls -l {} \; || true
+          find dl -size -1024c -exec rm -f {} \; || true
 
-    - name: Organize files
-      id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
-      run: |
-        cd openwrt/bin/targets/*/*
-        # rm -rf packages
-        mkdir -p firmware
-        # cp *.bin *.img.gz *.itb *.fip firmware/ 2>/dev/null || true
-        cp * firmware/ 2>/dev/null || true
-        cp sha256sums firmware/ 2>/dev/null || true
-        echo "FIRMWARE=$PWD/firmware" >> $GITHUB_ENV
-        echo "status=success" >> $GITHUB_OUTPUT
+      # 必须在 download 之后：这样失败就只可能是补丁本身的问题，
+      # 不会和"源码没下下来"混在一起。pipefail 是必须的，否则
+      # `make | tail` 的退出码是 tail 的 0，补丁打失败也会显示通过。
+      - name: 预检驱动补丁能否应用
+        run: |
+          set -o pipefail
+          cd openwrt
+          make package/mtk/drivers/mt_wifi/prepare V=s 2>&1 | tail -40
 
-    - name: Upload firmware directory
-      uses: actions/upload-artifact@main
-      if: steps.organize.outputs.status == 'success' && !cancelled()
-      with:
-        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: ${{ env.FIRMWARE }}
+      - name: 编译
+        id: compile
+        run: |
+          cd openwrt
+          echo "$(nproc) 线程编译"
+          make -j$(nproc) || make -j1 V=s
+          echo "status=success" >> $GITHUB_OUTPUT
+          ls -lh bin/targets/mediatek/filogic/ || true
+          echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
-    - name: Generate release tag
-      id: tag
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      run: |
-        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
-        touch release.txt
-        echo "status=success" >> $GITHUB_OUTPUT
+      - name: 空间占用
+        if: (!cancelled())
+        run: df -hT
 
-    - name: Upload firmware to release
-      uses: softprops/action-gh-release@v3
-      if: steps.tag.outputs.status == 'success' && !cancelled()
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ steps.tag.outputs.release_tag }}
-        body_path: release.txt
-        files: ${{ env.FIRMWARE }}/*
+      - name: 整理产物
+        id: organize
+        if: steps.compile.outputs.status == 'success' && !cancelled()
+        run: |
+          cd openwrt/bin/targets/*/*
+          mkdir -p firmware
+          # 只收本设备的镜像，避免把同 SoC 其它机型混进来
+          cp *"${DEVICE}"* firmware/ 2>/dev/null || cp * firmware/ 2>/dev/null || true
+          cp sha256sums firmware/ 2>/dev/null || true
+          [ -f profiles.json ] && cp profiles.json firmware/ || true
+          ls -lh firmware
+          echo "FIRMWARE=$PWD/firmware" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
 
-    - name: Delete workflow runs
-      uses: Mattraks/delete-workflow-runs@v2
-      env:
-        GITHUB_TOKEN: ${{ secrets.ACTIONS_TRIGGER_PAT }}
-      with:
-        token: ${{ secrets.ACTIONS_TRIGGER_PAT }}
-        retain_days: 0
-        keep_minimum_runs: 2
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        if: steps.organize.outputs.status == 'success' && !cancelled()
+        with:
+          name: XR30_firmware${{ env.FILE_DATE }}
+          path: ${{ env.FIRMWARE }}
 
-    - name: Remove old Releases
-      uses: actions/github-script@v9
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      env:
-        GITHUB_TOKEN: ${{ secrets.ACTIONS_TRIGGER_PAT }}
-      with:
-        github-token: ${{ secrets.ACTIONS_TRIGGER_PAT }}
-        script: |
-          const keepLatest = 3;
-          const deleteTags = true;
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        if: steps.organize.outputs.status == 'success' && !cancelled()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: build-${{ github.run_number }}-${{ github.run_id }}
+          name: XR30 ${{ env.DEVICE }} build ${{ github.run_number }}
+          body: |
+            自动构建产物
+            - 基线：${{ env.REPO_URL }} @ ${{ env.REPO_BRANCH }}
+            - 设备：${{ env.DEVICE }}（NAND + MTK/H大 U-Boot 固定分区）
+            - 含 mtwifi PMF 补丁（042 / 043）
+          files: ${{ env.FIRMWARE }}/*
 
-          const releases = await github.paginate(github.rest.repos.listReleases, {
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            per_page: 100
-          });
-
-          // Newest first by creation time (robust for non-semver date tags).
-          releases.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-          core.info(`Total releases: ${releases.length}`);
-
-          const toDelete = releases.slice(keepLatest);
-          for (const rel of toDelete) {
-            core.info(`Deleting release '${rel.tag_name}' (created ${rel.created_at})`);
-            await github.rest.repos.deleteRelease({
+      - name: 清理旧 Release（需要 PAT，缺省不阻断）
+        continue-on-error: true
+        uses: actions/github-script@v7
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          github-token: ${{ secrets.ACTIONS_TRIGGER_PAT || secrets.GITHUB_TOKEN }}
+          script: |
+            const keepLatest = 3;
+            const releases = await github.paginate(github.rest.repos.listReleases, {
               owner: context.repo.owner,
               repo: context.repo.repo,
-              release_id: rel.id
+              per_page: 100
             });
-            if (deleteTags && rel.tag_name) {
+            releases.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            for (const rel of releases.slice(keepLatest)) {
+              core.info(`删除 release ${rel.tag_name}`);
+              await github.rest.repos.deleteRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: rel.id
+              });
               try {
                 await github.rest.git.deleteRef({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   ref: `tags/${rel.tag_name}`
                 });
-                core.info(`  -> deleted tag ${rel.tag_name}`);
               } catch (err) {
-                core.info(`  -> tag ${rel.tag_name} not deleted: ${err.message}`);
+                core.info(`tag 未删除: ${err.message}`);
               }
             }
-          }
-          core.info(`Kept ${Math.min(keepLatest, releases.length)} release(s).`);

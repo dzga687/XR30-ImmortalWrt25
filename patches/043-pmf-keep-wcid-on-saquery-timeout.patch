@@ -1,0 +1,22 @@
+--- a/mt_wifi/embedded/security/pmf.c
++++ b/mt_wifi/embedded/security/pmf.c
+@@ -374,7 +374,8 @@
+ 
+ 			RTMPCancelTimer(&pEntry->SecConfig.PmfCfg.SAQueryTimer, &Cancelled);
+ 			RTMPCancelTimer(&pEntry->SecConfig.PmfCfg.SAQueryConfirmTimer, &Cancelled);
+-			cntl_disconnect_request(pEntry->wdev, CNTL_DISASSOC, pStaCfg->Bssid, REASON_DISASSOC_STA_LEAVING);
++			/* XR30-PMF: SA Query 超时不再断开上游 AP，避免中继链路被反复踢下线 */
++			(void)pStaCfg;
+ 		} else
+ #endif /* CONFIG_STA_SUPPORT */
+ 		{
+@@ -387,7 +388,8 @@
+ 				RepeaterDisconnectRootAP(pAd, pEntry->pReptCli, APCLI_DISCONNECT_SUB_REASON_AP_PEER_DISASSOC_REQ);
+ 			} else
+ #endif /* MAC_REPEATER_SUPPORT */
+-				mac_entry_delete(pAd, pEntry);
++				/* XR30-PMF: SA Query 超时不再踢除 wcid（平板连热点反复断流的兜底） */
++				(void)0;
+ #endif /* CONFIG_AP_SUPPORT */
+ 		}
+ 	}
