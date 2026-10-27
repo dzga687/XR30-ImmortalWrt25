@@ -206,6 +206,16 @@ jobs:
           cd openwrt
           make package/mtk/drivers/mt_wifi/prepare V=s 2>&1 | tail -40
 
+      # 每次失败都要重跑近 90 分钟的编译，太贵。打开 CONFIG_CCACHE 后
+      # 把 ~/.ccache 存成 cache：重跑时只重编改动过的部分。
+      - name: 恢复 ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ccache-
+
       - name: 编译
         id: compile
         timeout-minutes: 240
@@ -236,6 +246,26 @@ jobs:
           echo "status=success" >> $GITHUB_OUTPUT
           ls -lh bin/targets/mediatek/filogic/ || true
           echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+      # -j 并行时 OpenWrt 不会把子 make 的编译输出刷到主日志里，只留一句
+      # "ERROR: package/xxx failed to build"，看不到真实报错。失败后单独
+      # 把那个包用 V=s 重编一遍（源码已解压、依赖已就绪，通常几十秒），
+      # 真正的 gcc 报错就打出来了。
+      - name: 诊断编译失败（抓真实报错）
+        if: failure()
+        continue-on-error: true
+        timeout-minutes: 15
+        run: |
+          cd openwrt
+          if [ ! -f compile.log ]; then
+            echo "没有 compile.log（编译步骤没跑到）"
+            exit 0
+          fi
+          pkg=$(grep -oE 'ERROR: package/[^ ]+ failed' compile.log | head -1 | sed 's/^ERROR: //; s/ failed$//')
+          echo "失败包: ${pkg:-（未解析到）}"
+          [ -n "$pkg" ] || exit 0
+          echo "===== make $pkg/compile V=s 输出（尾部 160 行）====="
+          make "$pkg/compile" V=s -j1 2>&1 | tail -160 || true
 
       - name: 空间占用
         if: (!cancelled())

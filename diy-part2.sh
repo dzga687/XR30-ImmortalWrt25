@@ -111,7 +111,22 @@ else
     echo "  (没有 $PERLMOD_MK，跳过 perl 兜底)"
 fi
 
-echo "==> [4/5] 按 config.add 写入开关"
+echo "==> [4/5] 放宽 px5g 的 -Werror，并写入开关"
+# run 40546810515 挂在 package/utils/px5g-mbedtls：
+#   ERROR: package/utils/px5g-mbedtls failed to build (build variant: mbedtls)
+# 这个包的 Makefile 里写死了 TARGET_CFLAGS += -Wall -Werror，而它用的
+# mbedtls_pk_rsa() / mbedtls_rsa_gen_key() / mbedtls_pk_setup() 等旧接口
+# 在本树的 mbedtls 3.6.7 里已标 deprecated，警告被 -Werror 升级成错误。
+# px5g 只是个几百行的自签证书小工具，为它保留 -Werror 没有价值，
+# 去掉 -Werror 并显式忽略 deprecated-declarations 即可。
+for d in package/utils/px5g-mbedtls package/utils/px5g-openssl; do
+    mk="$d/Makefile"
+    [ -f "$mk" ] || continue
+    sed -i 's/-Wall -Werror/-Wall -Wno-error -Wno-error=deprecated-declarations -Wno-deprecated-declarations/' "$mk"
+    echo "  已放宽 $mk 的警告等级"
+    grep -n 'TARGET_CFLAGS' "$mk" || true
+done
+
 set_cfg() {
     local key="$1" val="$2"
     sed -i "/^${key}=/d" .config

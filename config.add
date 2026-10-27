@@ -103,3 +103,8 @@ CONFIG_PACKAGE_openssh-sftp-server=y
 # 这行只有在 CONFIG_PERL_TESTS 打开时才展开；固件不需要 perl 测试用例，
 # 关掉即可（同时省掉几十 MB 的 perlbase-*-test 包）。
 CONFIG_PERL_TESTS=n
+
+# --- 编译加速：ccache -------------------------------------------------------
+# workflow 里用 actions/cache 把 ~/.ccache 存下来，重跑时未改动的包直接命中，
+# 能把这轮 90 分钟的编译压到十几分钟（配置/脚本改动不会让目标文件失效）。
+CONFIG_CCACHE=y
