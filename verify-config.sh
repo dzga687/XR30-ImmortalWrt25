@@ -67,6 +67,16 @@ for p in 042-pmf-skip-saquery-on-not-robust-unicast.patch \
     fi
 done
 
+echo "==> 校验 perl 测试套件是否关闭"
+# perl 5.40 把 Math-BigRat 挪到了 dist/，而 perlbase-math 的测试用例安装
+# 仍指向 cpan/Math-BigRat/t，一旦打开就会在打包阶段 Error 23。
+if grep -qx 'CONFIG_PERL_TESTS=y' .config; then
+    printf '  [WARN] CONFIG_PERL_TESTS=y —— perlbase-math 会去拷已搬迁的 cpan/Math-BigRat/t\n'
+    printf '         （已由 perlmod.mk 的 --ignore-missing-args 兜住，但会白白多编一堆测试包）\n'
+else
+    printf '  [ OK ] perl 测试套件已关闭\n'
+fi
+
 if [ "$FAIL" -ne 0 ]; then
     echo
     echo "!! 有配置项没被 defconfig 保留，构建继续下去也会得到缺功能的固件，先修。"

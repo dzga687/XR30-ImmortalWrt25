@@ -97,6 +97,20 @@ else
     exit 1
 fi
 
+# perl 的测试用例安装是"整体拷贝目录"，源目录在 perl 5.40 里被搬迁过
+# （Math-BigRat 从 cpan/ 挪到 dist/），rsync 找不到就直接 code 23，
+# 整个 perlbase-math 打包失败 —— 固件里根本用不到测试用例，却卡住整条流水线。
+# config.add 已经把 CONFIG_PERL_TESTS 关掉，这里再给 rsync 上一层保险：
+# 源参数缺失时跳过而不是报错（ubuntu-22.04 自带 rsync 3.2.7，支持该选项）。
+PERLMOD_MK="feeds/packages/lang/perl/perlmod.mk"
+if [ -f "$PERLMOD_MK" ]; then
+    sed -i 's/rsync --relative -rlHp --itemize-changes/rsync --ignore-missing-args --relative -rlHp --itemize-changes/g' "$PERLMOD_MK"
+    echo "  已为 $PERLMOD_MK 的 rsync 加上 --ignore-missing-args"
+    grep -n -- '--ignore-missing-args' "$PERLMOD_MK" || true
+else
+    echo "  (没有 $PERLMOD_MK，跳过 perl 兜底)"
+fi
+
 echo "==> [4/5] 按 config.add 写入开关"
 set_cfg() {
     local key="$1" val="$2"

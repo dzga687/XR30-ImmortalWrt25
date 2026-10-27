@@ -210,9 +210,29 @@ jobs:
         id: compile
         timeout-minutes: 240
         run: |
+          set -o pipefail
           cd openwrt
           echo "$(nproc) 线程编译"
-          make -j$(nproc) || make -j1 V=s
+          # 原来写的是 `make -j || make -j1 V=s`：并行编到 105 分钟失败后，
+          # 又会用 -j1 从头再跑一遍，等于把失败现场的定位成本翻倍。
+          # 改成单遍编译 + 失败后直接从日志里摘出错误上下文。
+          if ! make -j$(nproc) 2>&1 | tee compile.log; then
+            echo
+            echo "==================== 编译失败摘要 ===================="
+            echo "--- 失败的包（ERROR: package/... failed）---"
+            grep -nE 'ERROR: package/.+ failed' compile.log | tail -20 || echo "  (无)"
+            echo "--- make 报错行 ---"
+            grep -nE '\*\*\* \[|: Error [0-9]+' compile.log | tail -20 || echo "  (无)"
+            echo
+            echo "--- 第一处错误的上下文 ---"
+            first=$(grep -nE 'ERROR: package/.+ failed' compile.log | head -1 | cut -d: -f1)
+            if [ -n "$first" ]; then
+              start=$((first > 40 ? first - 40 : 1))
+              sed -n "${start},$((first + 5))p" compile.log
+            fi
+            echo "======================================================"
+            exit 1
+          fi
           echo "status=success" >> $GITHUB_OUTPUT
           ls -lh bin/targets/mediatek/filogic/ || true
           echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
