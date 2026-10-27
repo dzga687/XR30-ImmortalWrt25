@@ -57,7 +57,7 @@ if [ "$patch_count" -eq 0 ]; then
 fi
 echo "  共植入 $patch_count 个补丁"
 
-echo "==> [3/5] 清理 passwall 残留与 weechat"
+echo "==> [3/5] 清理 passwall / weechat，并修正 istore 的依赖声明"
 # luci-app-passwall 不在任何构建期 feed 里（原脚本写的是 apk 运行时源，
 # 而且路径写错到了 package/system/opkg/files/），make defconfig 会把它静默丢弃。
 # 这里直接删掉相关行，避免"配置里写着有、固件里其实没有"的错觉。
@@ -78,6 +78,24 @@ for d in feeds/*/*/luci-app-weechat feeds/*/*/weechat \
         echo "  移除 $d（消除 kconfig 循环依赖）"
     fi
 done
+
+# luci-app-store 的 Makefile 里有两处会让 kconfig 直接把它隐藏掉：
+#   1) LUCI_EXTRA_DEPENDS:=luci-lib-taskd (>=1.0.19) —— 带版本号的依赖，
+#      kconfig 不认版本约束，生成的 depends on 永远不成立，符号被隐藏，
+#      .config 里连 "# ... is not set" 都不会出现（最难查的一种丢包方式）；
+#   2) LUCI_DEPENDS 里的 +tar —— 本树 tar 是 MENU 包，符号在某些配置下不可见。
+# 两者都去掉：luci-lib-taskd 已在 LUCI_DEPENDS 里硬依赖，版本约束多余；
+# tar 用 busybox 自带的即可，iStore 解包没有问题。
+STORE_MK="feeds/istore/luci/luci-app-store/Makefile"
+if [ -f "$STORE_MK" ]; then
+    sed -i -E '/^LUCI_EXTRA_DEPENDS:=/d' "$STORE_MK"
+    sed -i -E '/^LUCI_DEPENDS:=/ s/[[:space:]]*\+tar//' "$STORE_MK"
+    echo "  已修正 $STORE_MK"
+    grep -nE '^LUCI_(DEPENDS|EXTRA_DEPENDS)' "$STORE_MK" || true
+else
+    echo "!! 找不到 $STORE_MK（istore feed 没拉下来？）"
+    exit 1
+fi
 
 echo "==> [4/5] 按 config.add 写入开关"
 set_cfg() {

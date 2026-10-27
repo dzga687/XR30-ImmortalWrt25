@@ -151,37 +151,43 @@ jobs:
           cd openwrt
           bash "$GITHUB_WORKSPACE/verify-config.sh"
 
-      # 只在硬校验失败时执行：把 kconfig 里这些符号真实的 depends 打出来，
-      # 不用再靠猜"到底是哪一环断了"。kconfig 丢包是静默的，这是唯一可靠的取证方式。
-      # 注意：shell 默认带 -e，所以这里一律用 if 判断，不用 `grep && echo`，
-      # 否则 grep 不命中就会让整个诊断步骤退出。
       - name: 诊断缺失的配置项
         if: failure()
         run: |
           cd openwrt
-          S="luci-app-store luci-lib-taskd luci-lib-xterm taskd script-utils coreutils-stty mount-utils libuci-lua curl tar"
-          echo "===== 1) .config 中为 y 的 ====="
-          for s in $S; do
-            if grep -q "^CONFIG_PACKAGE_${s}=y" .config; then echo "  [y] $s"; fi
-          done
-          echo "===== 2) .config 中被显式关闭的 ====="
-          for s in $S; do
-            if grep -q "^# CONFIG_PACKAGE_${s} is not set" .config; then echo "  [n] $s"; fi
-          done
-          echo "===== 3) .config 中不存在该符号的（包没进树） ====="
-          for s in $S; do
-            if ! grep -qE "^(CONFIG_PACKAGE_${s}=|# CONFIG_PACKAGE_${s} is not set)" .config; then
-              echo "  [?] $s"
+          echo "===== 1) .config 中相关符号的取值 ====="
+          for s in luci-app-store luci-lib-taskd luci-lib-xterm taskd script-utils coreutils-stty mount-utils libuci-lua curl tar; do
+            if grep -q "^CONFIG_PACKAGE_${s}=y" .config; then
+              echo "  [y] $s"
+            elif grep -q "^# CONFIG_PACKAGE_${s} is not set" .config; then
+              echo "  [n] $s"
+            else
+              echo "  [?] $s   <- 符号不出现在 .config，说明被 kconfig 隐藏（depends 不成立）"
             fi
           done
-          echo "===== 4) kconfig 定义的 depends ====="
-          for s in $S; do
-            echo "--- PACKAGE_$s"
-            awk -v p="config PACKAGE_$s" '$0==p{f=1;next} f&&/^config /{exit} f' tmp/.config-package.in 2>/dev/null \
-              | grep -E 'depends on|select |default ' || echo "  (tmp/.config-package.in 里没有该符号 = 包没被 feeds 链接进来)"
-          done
-          echo "===== 5) istore feed 是否已链接 ====="
-          ls -d package/feeds/istore/* 2>/dev/null || echo "  (package/feeds/istore 不存在)"
+
+          echo "===== 2) tmp 下的元数据文件 ====="
+          ls -la tmp/ 2>/dev/null | head -15 || echo "  (没有 tmp 目录)"
+
+          echo "===== 3) .config-package.in 里 luci-app-store 的定义 ====="
+          if [ -f tmp/.config-package.in ]; then
+            echo "  行数: $(wc -l < tmp/.config-package.in)"
+            grep -A10 "^config PACKAGE_luci-app-store$" tmp/.config-package.in || echo "  (没有 config PACKAGE_luci-app-store 定义)"
+          else
+            echo "  tmp/.config-package.in 不存在，重新生成元数据后再看"
+            make prepare-tmpinfo V=s 2>&1 | tail -40 || true
+            if [ -f tmp/.config-package.in ]; then
+              echo "  重新生成后行数: $(wc -l < tmp/.config-package.in)"
+              grep -A10 "^config PACKAGE_luci-app-store$" tmp/.config-package.in || echo "  重新生成后仍无该符号"
+            else
+              echo "  prepare-tmpinfo 之后依然没有 tmp/.config-package.in"
+            fi
+          fi
+
+          echo "===== 4) istore 包在树里的实际内容 ====="
+          ls -l package/feeds/istore/ 2>/dev/null | head -10 || echo "  不存在"
+          echo "--- luci-app-store 的 Makefile 关键行 ---"
+          grep -nE '^LUCI_(DEPENDS|EXTRA_DEPENDS|PKGARCH)' package/feeds/istore/luci-app-store/Makefile 2>/dev/null || echo "  (读不到)"
 
       - name: 下载依赖包
         timeout-minutes: 60
