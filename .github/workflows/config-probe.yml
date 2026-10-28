@@ -1,0 +1,85 @@
+#
+# 配置探针 —— 只跑"拉源码 → feeds → defconfig"，不做编译，约 15 分钟。
+#
+# 目的：拿到 defconfig 之后真实的 .config 与 tmp/.packageinfo，
+# 用来算清楚"到底是谁把 perl/ruby/python 这一大坨拉进来的"。
+# 上一轮构建把 850 个包装进 rootfs、共 279.3 MiB，而设备 UBI 分区只有
+# 116736k —— 就算装包不冲突，factory.bin 也塞不下，必须先裁配置。
+#
+# 手动触发：POST /repos/{owner}/{repo}/actions/workflows/config-probe.yml/dispatches
+#
+name: Config Probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 安装最小依赖
+        timeout-minutes: 20
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          sudo systemctl stop unattended-upgrades 2>/dev/null || true
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=60 \
+                       -o DPkg::Lock::Timeout=120 update
+          timeout 900 sudo -E apt-get -qq install -y --no-install-recommends \
+            -o DPkg::Lock::Timeout=120 \
+            build-essential gcc g++ make libncurses-dev zlib1g-dev libssl-dev \
+            python3 python3-distutils rsync unzip git file wget ca-certificates \
+            bzip2 gawk gettext libelf-dev subversion patch diffstat
+
+      - name: 拉源码 + feeds
+        timeout-minutes: 25
+        run: |
+          git clone --depth 1 https://github.com/chasey-dev/immortalwrt-mt798x-rebase -b 25.12 openwrt
+          cd openwrt
+          bash "$GITHUB_WORKSPACE/diy-part1.sh"
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 写入配置并 defconfig
+        timeout-minutes: 20
+        run: |
+          cp "$GITHUB_WORKSPACE/.config" openwrt/.config
+          cd openwrt
+          bash "$GITHUB_WORKSPACE/diy-part2.sh"
+          make defconfig
+
+      - name: 导出配置与元数据
+        run: |
+          cd openwrt
+          if [ ! -f tmp/.packageinfo ]; then
+            echo "tmp/.packageinfo 不存在，重新生成"
+            make prepare-tmpinfo V=s 2>&1 | tail -20 || true
+          fi
+          echo "===== defconfig 后 CONFIG_PACKAGE_*=y 的数量 ====="
+          grep -c '^CONFIG_PACKAGE_.*=y$' .config || true
+          grep '^CONFIG_PACKAGE_.*=y$' .config | sed 's/^CONFIG_PACKAGE_//; s/=y$//' | sort > "$GITHUB_WORKSPACE/postconf.txt"
+          echo "===== 重量级包是否在列 ====="
+          for k in perl ruby python3 spamassassin tcl ripe-atlas luci-app-openclash luci-app-passwall luci-app-qmodem-next qmodem sms-forwarder sms-forwarder-next; do
+            if grep -qx "$k" "$GITHUB_WORKSPACE/postconf.txt"; then echo "  [直接选中] $k"; else echo "  [-] $k"; fi
+          done
+          echo "===== 各前缀数量 ====="
+          for p in perl ruby python3 kmod- luci-; do
+            echo "  $p : $(grep -c "^$p" "$GITHUB_WORKSPACE/postconf.txt" || true)"
+          done
+          cp tmp/.packageinfo "$GITHUB_WORKSPACE/packageinfo.txt"
+          cp .config "$GITHUB_WORKSPACE/postdefconfig.config"
+          ls -l "$GITHUB_WORKSPACE/postconf.txt" "$GITHUB_WORKSPACE/packageinfo.txt"
+
+      - name: 上传
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe
+          path: |
+            postconf.txt
+            packageinfo.txt
+            postdefconfig.config
+          retention-days: 7
