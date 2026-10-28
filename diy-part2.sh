@@ -144,6 +144,23 @@ for d in package/utils/px5g-mbedtls package/utils/px5g-openssl; do
     grep -n 'TARGET_CFLAGS' "$mk" || true
 done
 
+# qmodem-voip 硬依赖 px5g-mbedtls，而树里同时还有 px5g-openssl 被别的包选中。
+# 两者都 PROVIDES:=px5g、都装 /usr/sbin/px5g，apk 装 rootfs 时直接报
+#   ERROR: unable to select packages:
+#     px5g-mbedtls-11: conflicts: px5g-openssl-1[px5g=11]
+# run 40616025816 / 40593312536 都是死在这一步（编译 173/184 分钟处，全部包
+# 都编完了才失败，最亏的一种死法）。
+# px5g 只是个生成自签证书的几百行小工具，openssl 与 mbedtls 两个实现对外
+# 行为一致，把 voipd 的依赖改成 px5g-openssl，让全树只留一个变体。
+VOIP_MK="feeds/qmodem/application/voipd/Makefile"
+if [ -f "$VOIP_MK" ]; then
+    sed -i 's/+px5g-mbedtls/+px5g-openssl/g' "$VOIP_MK"
+    echo "  已把 qmodem-voip 的 px5g 依赖改为 px5g-openssl（避免变体冲突）"
+    grep -n 'px5g' "$VOIP_MK" || true
+else
+    echo "  (没有 $VOIP_MK，跳过 px5g 变体统一)"
+fi
+
 set_cfg() {
     local key="$1" val="$2"
     sed -i "/^${key}=/d" .config

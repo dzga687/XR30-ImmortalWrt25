@@ -77,6 +77,29 @@ else
     printf '  [ OK ] perl 测试套件已关闭\n'
 fi
 
+echo "==> 校验 px5g 只选中一个变体"
+# px5g 的三个变体都 PROVIDES:=px5g、都装 /usr/sbin/px5g。同时选中两个时
+# kconfig 不报错、编译也能过，直到最后 apk 把包装进 rootfs 才炸：
+#   ERROR: unable to select packages:
+#     px5g-mbedtls-11: conflicts: px5g-openssl-1[px5g=11]
+# 那已经是编译第 170+ 分钟，代价太高，这里提前拦住。
+px5g_y=$(grep -cE '^CONFIG_PACKAGE_px5g-[a-z]+=y$' .config || true)
+grep -E '^CONFIG_PACKAGE_px5g-' .config || echo "  (没有任何 px5g 包)"
+if [ "${px5g_y:-0}" -gt 1 ]; then
+    echo "  [FAIL] 同时选中了 ${px5g_y} 个 px5g 变体，apk 装 rootfs 时必然冲突"
+    echo "  --- 谁要的它们（tmp/.config-package.in 片段）---"
+    for v in mbedtls openssl standalone wolfssl; do
+        grep -n "PACKAGE_px5g-$v" tmp/.config-package.in 2>/dev/null | head -3 | \
+        while IFS=: read -r ln rest; do
+            start=$((ln - 5)); [ "$start" -lt 1 ] && start=1
+            echo "  [$v @${ln}] $(sed -n "${start},${ln}p" tmp/.config-package.in | tr '\n' '|')"
+        done
+    done
+    FAIL=1
+else
+    printf '  [ OK ] px5g 变体数量 = %s\n' "${px5g_y:-0}"
+fi
+
 if [ "$FAIL" -ne 0 ]; then
     echo
     echo "!! 有配置项没被 defconfig 保留，构建继续下去也会得到缺功能的固件，先修。"
