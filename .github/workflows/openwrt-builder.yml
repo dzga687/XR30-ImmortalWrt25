@@ -215,7 +215,10 @@ jobs:
         id: ccache-restore
         uses: actions/cache/restore@v4
         with:
-          path: ~/.ccache
+          # rules.mk: CCACHE_DIR ?= $(TOPDIR)/.ccache，也就是 openwrt/.ccache。
+          # 之前写 ~/.ccache 是错的，所以上一轮"Cache save failed: path does not
+          # exist"，缓存从来没生效过。
+          path: openwrt/.ccache
           key: ccache-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             ccache-
@@ -226,7 +229,8 @@ jobs:
         run: |
           set -o pipefail
           cd openwrt
-          echo "$(nproc) 线程编译"
+          mkdir -p .ccache
+          echo "$(nproc) 线程编译 / ccache 目录 $(pwd)/.ccache"
           # 原来写的是 `make -j || make -j1 V=s`：并行编到 105 分钟失败后，
           # 又会用 -j1 从头再跑一遍，等于把失败现场的定位成本翻倍。
           # 改成单遍编译 + 失败后直接从日志里摘出错误上下文。
@@ -255,21 +259,38 @@ jobs:
       # "ERROR: package/xxx failed to build"，看不到真实报错。失败后单独
       # 把那个包用 V=s 重编一遍（源码已解压、依赖已就绪，通常几十秒），
       # 真正的 gcc 报错就打出来了。
-      - name: 诊断编译失败（抓真实报错）
+      - name: 诊断编译失败（抓真实报错 / 顺便抢救）
+        id: diag
         if: failure()
         continue-on-error: true
-        timeout-minutes: 15
+        timeout-minutes: 45
         run: |
           cd openwrt
-          if [ ! -f compile.log ]; then
-            echo "没有 compile.log（编译步骤没跑到）"
-            exit 0
+          staging_dir/host/bin/ccache -s 2>/dev/null || echo "(ccache 不可用)"
+
+          if [ -f compile.log ]; then
+            pkg=$(grep -oE 'ERROR: package/[^ ]+ failed' compile.log | head -1 | sed 's/^ERROR: //; s/ failed$//')
+            echo "包级失败: ${pkg:-（无）}"
+            if [ -n "$pkg" ]; then
+              echo "===== make $pkg/compile V=s（尾部 160 行）====="
+              make "$pkg/compile" V=s -j1 2>&1 | tail -160 || true
+              exit 0
+            fi
           fi
-          pkg=$(grep -oE 'ERROR: package/[^ ]+ failed' compile.log | head -1 | sed 's/^ERROR: //; s/ failed$//')
-          echo "失败包: ${pkg:-（未解析到）}"
-          [ -n "$pkg" ] || exit 0
-          echo "===== make $pkg/compile V=s 输出（尾部 160 行）====="
-          make "$pkg/compile" V=s -j1 2>&1 | tail -160 || true
+
+          # 没有包级失败信息，说明挂在 package/install 之后的阶段：apk 把包装进
+          # rootfs、或者镜像生成。这时 -j 的输出被 OpenWrt 吞掉了，看不出错在哪。
+          # 所有包都已经编译完，用 -j1 V=s 从失败点续跑：既能看到真实报错，也能在
+          # "只是并行竞争/时序问题" 时把这次构建救回来。
+          echo "===== make -j1 V=s 续跑（完整日志在 resume.log）====="
+          if make -j1 V=s > resume.log 2>&1; then
+            echo "续跑成功：并行阶段有问题，单线程能过"
+            tail -25 resume.log
+            echo "recovered=success" >> $GITHUB_OUTPUT
+          else
+            echo "===== 续跑仍失败，尾部 260 行 ====="
+            tail -260 resume.log
+          fi
 
       - name: 空间占用
         if: (!cancelled())
@@ -279,13 +300,14 @@ jobs:
         if: always() && !cancelled()
         uses: actions/cache/save@v4
         with:
-          path: ~/.ccache
+          path: openwrt/.ccache
           key: ccache-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: 整理产物
         id: organize
-        if: steps.compile.outputs.status == 'success' && !cancelled()
+        if: "(steps.compile.outputs.status == 'success' || steps.diag.outputs.recovered == 'success') && !cancelled()"
         run: |
+          [ -n "$FILE_DATE" ] || echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
           cd openwrt/bin/targets/*/*
           mkdir -p firmware
           # 只收本设备的镜像，避免把同 SoC 其它机型混进来
